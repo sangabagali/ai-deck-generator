@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Deck Generator</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', Calibri, sans-serif; background: #0A1628; color: #F0F4F8; }
+    select, input, textarea { font-family: inherit; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0A1628; }
+    ::-webkit-scrollbar-thumb { background: #1E3A5F; border-radius: 3px; }
+    .btn-primary {
+      padding: 13px; border-radius: 6px; font-size: 13px; font-weight: 800;
+      letter-spacing: 2px; border: none; cursor: pointer;
+      background: linear-gradient(135deg, #00C4B4, #009B8E);
+      color: #0A1628; transition: all .2s; width: 100%;
+    }
+    .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); box-shadow: 0 4px 15px rgba(0,196,180,0.3); }
+    .btn-primary:disabled { background: #1E3A5F; color: #4A5568; cursor: not-allowed; transform: none; box-shadow: none; }
+    /* API key modal */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.8);
+      display: flex; align-items: center; justify-content: center; z-index: 1000;
+    }
+    .modal-box {
+      background: #0F2044; border: 1px solid #00C4B4; border-radius: 10px;
+      padding: 32px; width: 480px; max-width: 95vw;
+    }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useCallback, useRef, useEffect } = React;
+
+// ─── MASTER SYSTEM PROMPT ─────────────────────────────────────────────────────
+const MASTER_SYSTEM_PROMPT = `You are an expert industry analyst and PowerPoint presentation architect. Your job is to produce a complete, research-grade JSON payload that will be used to generate a polished 13-slide PowerPoint deck.
+
+## YOUR TASK
+Given an industry and optional customisations, produce a deeply researched, highly specific JSON object (no markdown fences, raw JSON only) describing every slide in the deck.
+
+## SLIDE STRUCTURE (always exactly this order)
+1. title – headline stats (3 stats)
+2. agenda – 6 sections
+3. landscape – market size + 5 macro forces + 4 growth bars
+4. trends – 6 trends each with heat score 0–1
+5. imperatives – 5 imperatives each with urgency score 0–1
+6. usecases_cx – 4 AI use cases for Customer Experience
+7. usecases_sc – 4 AI use cases for Supply Chain / Operations
+8. usecases_ops – 4 AI use cases for Marketing, Workforce & Support
+9a. capmap – 6 L1 capability domains (MUST include Planning as one domain), each with 4 sub-capabilities
+9b. capdetail – same 6 domains, each sub-capability with 2 specific AI use cases
+10. mapping – 12 rows mapping use cases to capabilities
+11. examples – 6 branded industry examples
+12. roadmap – 3-phase roadmap (0–3, 3–6, 6–12 months), 4 actions each
+
+## JSON SCHEMA — return EXACTLY this structure, raw JSON only, no fences:
+{
+  "industry": string,
+  "subtitle": string,
+  "audience": string,
+  "palette": { "primary": hex6, "accent": hex6, "highlight": hex6 },
+  "slides": {
+    "title": {
+      "heading": string, "subheading": string, "tagline": string,
+      "stats": [{ "value": string, "label": string, "color": "primary|accent|highlight" }]
+    },
+    "landscape": {
+      "marketSize": string, "marketLabel": string,
+      "growthBars": [{ "label": string, "value": string, "pct": number }],
+      "forces": [{ "icon": string, "label": string, "desc": string, "color": "primary|accent|highlight|green|coral" }]
+    },
+    "trends": [{ "num": string, "title": string, "heat": number, "color": "primary|accent|highlight|purple|coral|green|orange", "icon": string, "desc": string }],
+    "imperatives": [{ "n": string, "icon": string, "imp": string, "urgency": number, "color": "primary|accent|highlight|purple|coral|green", "detail": string }],
+    "usecases_cx":  [{ "title": string, "agent": boolean, "value": string, "valueColor": "green|primary|accent|highlight|purple|coral", "desc": string, "example": string }],
+    "usecases_sc":  [{ "title": string, "agent": boolean, "value": string, "valueColor": "green|primary|accent|highlight|purple|coral", "desc": string, "example": string }],
+    "usecases_ops": [{ "title": string, "agent": boolean, "value": string, "valueColor": "green|primary|accent|highlight|purple|coral", "desc": string, "example": string }],
+    "capmap": [{ "domain": string, "color": "primary|accent|highlight|purple|coral|green", "icon": string, "subs": [string,string,string,string] }],
+    "capdetail": [{ "domain": string, "color": "primary|accent|highlight|purple|coral|green", "subs": [{ "cap": string, "uses": [string,string] }] }],
+    "mapping": [{ "uc": string, "dom": string, "cap": string, "val": string, "impact": "HIGH|MED|LOW", "iColor": "green|accent|highlight" }],
+    "examples": [{ "brand": string, "color": hex6, "area": string, "usecase": string, "result": string }],
+    "roadmap": { "phases": [{ "phase": string, "label": string, "period": string, "color": "primary|accent|purple", "items": [string,string,string,string] }], "closingMessage": string }
+  }
+}
+
+RULES: All content specific to the industry. Real companies. Real data. Industry-accurate capability terminology. Palette designed for that industry. hex = 6 chars, no #. Return ONLY raw JSON.`;
+
+// ─── PPTX RENDERER ────────────────────────────────────────────────────────────
+async function renderDeck(data, onLog) {
+  onLog("Loading PptxGenJS library...", "info");
+  if (!window.PptxGenJS) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/pptxgenjs/3.12.0/pptxgen.bundled.js";
+      s.onload = resolve; s.onerror = () => reject(new Error("Failed to load PptxGenJS from CDN"));
+      document.head.appendChild(s);
+    });
+  }
+  onLog("Building slides...", "info");
+
+  const pres = new window.PptxGenJS();
+  pres.layout = "LAYOUT_16x9";
+
+  const P = {
+    navy:"0A1628", navyMid:"0F2044", navyLight:"162955",
+    white:"FFFFFF", offWhite:"F0F4F8", lightGray:"CBD5E1",
+    muted:"94A3B8", textDark:"1E293B",
+    green:"27AE60", coral:"E8473F", purple:"7B4FBE", orange:"E67E22",
+    primary:data.palette.primary, accent:data.palette.accent, highlight:data.palette.highlight,
+  };
+  const rc = c => P[c] || c;
+  const sh = () => ({ type:"outer", blur:7, offset:2, angle:135, color:"000000", opacity:0.13 });
+
+  const hdr = (s, title, num, dark) => {
+    const bg = dark ? P.navyMid : P.navy;
+    s.addShape(pres.ShapeType.rect, {x:0,y:0,w:10,h:.78, fill:{color:bg}, line:{color:bg}});
+    s.addText(title, {x:.35,y:.1,w:8.3,h:.58, fontSize:19,bold:true,color:P.primary,fontFace:"Calibri",charSpacing:3});
+    if(num) s.addText(num, {x:9,y:.1,w:.7,h:.5, fontSize:18,bold:true,color:P.primary,fontFace:"Calibri",align:"right"});
+  };
+  const pbar = (s,x,y,w,h,pct,color,bg) => {
+    s.addShape(pres.ShapeType.rect, {x,y,w,h, fill:{color:bg||P.navyLight}, line:{color:bg||P.navyLight}});
+    if(pct>0) s.addShape(pres.ShapeType.rect, {x,y,w:w*Math.min(pct,1),h, fill:{color}, line:{color}});
+  };
+  const ring = (s,x,y,r,val,lbl,color) => {
+    s.addShape(pres.ShapeType.ellipse, {x:x-r,y:y-r,w:r*2,h:r*2, fill:{color}, line:{color}});
+    s.addShape(pres.ShapeType.ellipse, {x:x-r*.72,y:y-r*.72,w:r*1.44,h:r*1.44, fill:{color:P.navy}, line:{color:P.navy}});
+    s.addText(val, {x:x-r,y:y-r*.45,w:r*2,h:r*.7, fontSize:Math.round(r*22),bold:true,color,fontFace:"Calibri",align:"center",margin:0});
+    s.addText(lbl, {x:x-r*1.1,y:y+r*.35,w:r*2.2,h:r*.55, fontSize:Math.round(r*8),color:P.lightGray,fontFace:"Calibri",align:"center"});
+  };
+
+  const { slides: sl } = data;
+
+  // S1: TITLE
+  { const s=pres.addSlide(); s.background={color:P.navy};
+    s.addShape(pres.ShapeType.rect,    {x:0,y:0,w:.2,h:5.625,fill:{color:P.primary},line:{color:P.primary}});
+    s.addShape(pres.ShapeType.rect,    {x:6.8,y:0,w:3.2,h:2.6,fill:{color:P.navyMid},line:{color:P.navyMid}});
+    s.addShape(pres.ShapeType.rect,    {x:7.8,y:0,w:2.2,h:1.5,fill:{color:P.primary,transparency:82},line:{color:P.primary,transparency:82}});
+    s.addShape(pres.ShapeType.ellipse, {x:8.2,y:2.8,w:1.5,h:1.5,fill:{color:P.primary,transparency:88},line:{color:P.primary}});
+    s.addShape(pres.ShapeType.ellipse, {x:7.5,y:3.6,w:.8,h:.8,fill:{color:P.accent,transparency:80},line:{color:P.accent}});
+    s.addText(sl.title.heading,    {x:.45,y:.65,w:9,h:.8, fontSize:36,bold:true,color:P.primary,fontFace:"Calibri",charSpacing:3});
+    s.addText(sl.title.subheading, {x:.45,y:1.55,w:8,h:.5, fontSize:21,color:P.white,fontFace:"Calibri"});
+    s.addText(sl.title.tagline,    {x:.45,y:2.1,w:7.5,h:.38, fontSize:14,italic:true,color:P.lightGray,fontFace:"Calibri"});
+    sl.title.stats.forEach((st,i) => ring(s,1.55+i*2.5,4.15,.82,st.value,st.label,rc(st.color)));
+    s.addShape(pres.ShapeType.rect, {x:0,y:5.1,w:10,h:.525,fill:{color:P.primary},line:{color:P.primary}});
+    s.addText(data.audience+" | 2025–2026", {x:.4,y:5.18,w:9.2,h:.38, fontSize:12,bold:true,color:P.navy,fontFace:"Calibri"});
+  }
+
+  // S2: AGENDA
+  { const s=pres.addSlide(); s.background={color:P.offWhite}; hdr(s,"AGENDA",null,false);
+    const ac=[P.primary,P.accent,P.purple,P.primary,P.accent,P.coral];
+    [{num:"01",t:"Industry Landscape",    sub:"Key macro forces shaping the sector"},
+     {num:"02",t:"Top Trends 2025–26",    sub:"Critical shifts to navigate"},
+     {num:"03",t:"Strategic Imperatives", sub:"What leaders must act on now"},
+     {num:"04",t:"AI & Agentic Use Cases",sub:"Across the value chain"},
+     {num:"05",t:"Business Capability Map",sub:"AI use cases mapped to capabilities"},
+     {num:"06",t:"Industry Examples",     sub:"Real-world leaders and results"}
+    ].forEach((item,i)=>{
+      const col=i<3?0:1,row=i%3,x=col===0?.35:5.18,y=.95+row*1.43,c=ac[i];
+      s.addShape(pres.ShapeType.rect,{x,y,w:4.55,h:1.25,fill:{color:P.white},line:{color:P.lightGray},shadow:sh()});
+      s.addShape(pres.ShapeType.rect,{x,y,w:.6,h:1.25,fill:{color:c},line:{color:c}});
+      s.addText(item.num,{x,y:y+.38,w:.6,h:.48,fontSize:15,bold:true,color:P.white,fontFace:"Calibri",align:"center",margin:0});
+      s.addShape(pres.ShapeType.rect,{x:x+.6,y,w:3.95,h:.06,fill:{color:c,transparency:60},line:{color:c,transparency:60}});
+      s.addText(item.t,  {x:x+.72,y:y+.12,w:3.7,h:.42,fontSize:13,bold:true,color:P.textDark,fontFace:"Calibri"});
+      s.addText(item.sub,{x:x+.72,y:y+.6, w:3.7,h:.42,fontSize:11,italic:true,color:P.muted,fontFace:"Calibri"});
+    });
+  }
+
+  // S3: LANDSCAPE
+  { const s=pres.addSlide(); s.background={color:P.navy};
+    s.addShape(pres.ShapeType.rect,{x:0,y:0,w:.2,h:5.625,fill:{color:P.primary},line:{color:P.primary}});
+    hdr(s,"INDUSTRY LANDSCAPE","01",true);
+    const ld=sl.landscape;
+    s.addShape(pres.ShapeType.rect,{x:.3,y:.9,w:3.2,h:4.4,fill:{color:P.navyMid},line:{color:P.navyMid},shadow:sh()});
+    s.addText(ld.marketSize, {x:.3,y:1.1,w:3.2,h:.85,fontSize:40,bold:true,color:P.primary,fontFace:"Calibri",align:"center"});
+    s.addText(ld.marketLabel,{x:.3,y:1.95,w:3.2,h:.32,fontSize:12,color:P.white,fontFace:"Calibri",align:"center"});
+    s.addShape(pres.ShapeType.line,{x:.6,y:2.42,w:2.6,h:0,line:{color:P.primary,transparency:60,width:1}});
+    s.addText("GROWTH INDICATORS",{x:.3,y:2.48,w:3.2,h:.28,fontSize:8,bold:true,color:P.muted,fontFace:"Calibri",align:"center",charSpacing:2});
+    const bc=[P.primary,P.accent,P.highlight,P.purple];
+    ld.growthBars.forEach((b,i)=>{
+      const by=2.88+i*.72,col=bc[i%bc.length];
+      s.addText(b.label,{x:.42,y:by,w:2.4,h:.26,fontSize:9,color:P.lightGray,fontFace:"Calibri"});
+      pbar(s,.42,by+.28,2.6,.22,b.pct,col,P.navyLight);
+      s.addText(b.value,{x:3.0,y:by+.25,w:.55,h:.26,fontSize:9,bold:true,color:col,fontFace:"Calibri",align:"right"});
+    });
+    ld.forces.forEach((f,i)=>{
+      const y=.92+i*.88,col=rc(f.color);
+      s.addShape(pres.ShapeType.rect,{x:3.68,y,w:6,h:.78,fill:{color:P.navyLight},line:{color:col,transparency:55}});
+      s.addShape(pres.ShapeType.rect,{x:3.68,y,w:.08,h:.78,fill:{color:col},line:{color:col}});
+      s.addText(f.icon, {x:3.78,y:y+.1,w:.5,h:.55,fontSize:20,align:"center"});
+      s.addText(f.label,{x:4.35,y:y+.08,w:5.15,h:.3,fontSize:12,bold:true,color:col,fontFace:"Calibri"});
+      s.addText(f.desc, {x:4.35,y:y+.4,w:5.15,h:.3,fontSize:10,color:P.lightGray,fontFace:"Calibri"});
+    });
+  }
+
+  // S4: TRENDS
+  { const s=pres.addSlide(); s.background={color:P.offWhite}; hdr(s,"TOP TRENDS 2025–2026","02",false);
+    sl.trends.forEach((t,i)=>{
+      const col=i%2,row=Math.floor(i/2),x=col===0?.28:5.15,y=.9+row*1.52,c=rc(t.color);
+      s.addShape(pres.ShapeType.rect,{x,y,w:4.65,h:1.38,fill:{color:P.white},line:{color:P.lightGray},shadow:sh()});
+      s.addShape(pres.ShapeType.rect,{x,y,w:4.65,h:.1,fill:{color:c},line:{color:c}});
+      s.addShape(pres.ShapeType.ellipse,{x:x+.12,y:y+.2,w:.42,h:.42,fill:{color:c},line:{color:c}});
+      s.addText(t.num,  {x:x+.12,y:y+.2,w:.42,h:.42,fontSize:14,bold:true,color:P.white,fontFace:"Calibri",align:"center",valign:"middle"});
+      s.addText(t.icon, {x:x+.62,y:y+.12,w:.42,h:.42,fontSize:18,align:"center"});
+      s.addText(t.title,{x:x+1.12,y:y+.12,w:3.1,h:.36,fontSize:12,bold:true,color:P.textDark,fontFace:"Calibri"});
+      s.addText("TREND HEAT",{x:x+1.12,y:y+.5,w:.9,h:.2,fontSize:7,bold:true,color:P.muted,fontFace:"Calibri",charSpacing:1});
+      pbar(s,x+2.05,y+.52,2.42,.18,t.heat,c,P.offWhite);
+      s.addText(Math.round(t.heat*100)+"%",{x:x+4.5,y:y+.5,w:.5,h:.2,fontSize:8,bold:true,color:c,fontFace:"Calibri",align:"right"});
+      s.addText(t.desc, {x:x+.12,y:y+.78,w:4.38,h:.52,fontSize:9.5,color:P.muted,fontFace:"Calibri"});
+    });
+  }
+
+  // S5: IMPERATIVES
+  { const s=pres.addSlide(); s.background={color:P.navy};
+    s.addShape(pres.ShapeType.rect,{x:0,y:0,w:.2,h:5.625,fill:{color:P.primary},line:{color:P.primary}});
+    hdr(s,"STRATEGIC IMPERATIVES","03",true);
+    sl.imperatives.forEach((im,i)=>{
+      const y=.88+i*.92,c=rc(im.color);
+      s.addShape(pres.ShapeType.rect,{x:.3,y,w:9.35,h:.82,fill:{color:P.navyLight},line:{color:c,transparency:65}});
+      s.addShape(pres.ShapeType.rect,{x:.3,y,w:.08,h:.82,fill:{color:c},line:{color:c}});
+      s.addShape(pres.ShapeType.ellipse,{x:.45,y:y+.2,w:.42,h:.42,fill:{color:c},line:{color:c}});
+      s.addText(im.n,    {x:.45,y:y+.2,w:.42,h:.42,fontSize:11,bold:true,color:P.white,fontFace:"Calibri",align:"center",valign:"middle"});
+      s.addText(im.icon, {x:.97,y:y+.18,w:.38,h:.42,fontSize:18,align:"center"});
+      s.addText(im.imp,  {x:1.42,y:y+.08,w:3.2,h:.36,fontSize:12,bold:true,color:c,fontFace:"Calibri"});
+      s.addText("URGENCY",{x:4.72,y:y+.1,w:.65,h:.22,fontSize:7,bold:true,color:P.muted,fontFace:"Calibri",charSpacing:1});
+      pbar(s,5.38,y+.12,2.3,.2,im.urgency,c,P.navyMid);
+      s.addText(Math.round(im.urgency*100)+"%",{x:7.72,y:y+.1,w:.45,h:.22,fontSize:8,bold:true,color:c,fontFace:"Calibri"});
+      s.addText(im.detail,{x:1.42,y:y+.46,w:7,h:.3,fontSize:10,color:P.lightGray,fontFace:"Calibri"});
+    });
+  }
+
+  // S6-8: USE CASES
+  [ {title:"AI USE CASES — CUSTOMER EXPERIENCE",           num:"04a",data:sl.usecases_cx, hBg:P.navy,    uc:P.primary,stage:"Customer Experience & Engagement"},
+    {title:"AI USE CASES — SUPPLY CHAIN & OPERATIONS",     num:"04b",data:sl.usecases_sc, hBg:P.navyMid, uc:P.accent, stage:"Supply Chain, Operations & Planning"},
+    {title:"AI USE CASES — MARKETING, WORKFORCE & SUPPORT",num:"04c",data:sl.usecases_ops,hBg:"4A1568",  uc:P.primary,stage:"Marketing, Workforce & Corporate Functions"}
+  ].forEach(({title,num,data:ucs,hBg,uc,stage})=>{
+    const s=pres.addSlide(); s.background={color:P.offWhite}; hdr(s,title,num,false);
+    s.addShape(pres.ShapeType.rect,{x:.3,y:.82,w:9.4,h:.22,fill:{color:uc,transparency:88},line:{color:uc,transparency:88}});
+    s.addText("Value Chain Stage: "+stage,{x:.3,y:.83,w:9.4,h:.2,fontSize:9,bold:true,italic:true,color:uc,fontFace:"Calibri"});
+    ucs.forEach((uc2,i)=>{
+      const col=i%2,row=Math.floor(i/2),x=col===0?.28:5.12,y=1.12+row*2.08,vc=rc(uc2.valueColor);
+      s.addShape(pres.ShapeType.rect,{x,y,w:4.62,h:1.92,fill:{color:P.white},line:{color:P.lightGray},shadow:sh()});
+      s.addShape(pres.ShapeType.rect,{x,y,w:4.62,h:.38,fill:{color:hBg},line:{color:hBg}});
+      if(uc2.agent){ s.addShape(pres.ShapeType.rect,{x:x+3.3,y:y+.07,w:1,h:.24,fill:{color:P.primary},line:{color:P.primary}}); s.addText("AGENTIC",{x:x+3.3,y:y+.07,w:1,h:.24,fontSize:8,bold:true,color:P.navy,fontFace:"Calibri",align:"center",valign:"middle"}); }
+      s.addText(uc2.title,{x:x+.1,y:y+.06,w:3.15,h:.28,fontSize:11,bold:true,color:uc,fontFace:"Calibri"});
+      s.addShape(pres.ShapeType.rect,{x:x+.08,y:y+.44,w:1.85,h:.24,fill:{color:vc,transparency:15},line:{color:vc}});
+      s.addText(uc2.value,{x:x+.08,y:y+.44,w:1.85,h:.24,fontSize:9,bold:true,color:P.navy,fontFace:"Calibri",align:"center",valign:"middle"});
+      s.addText(uc2.desc,{x:x+.1,y:y+.74,w:4.38,h:.62,fontSize:10,color:P.textDark,fontFace:"Calibri"});
+      s.addShape(pres.ShapeType.line,{x:x+.1,y:y+1.41,w:4.3,h:0,line:{color:P.lightGray,width:.5}});
+      s.addText("→ "+uc2.example,{x:x+.1,y:y+1.46,w:4.38,h:.38,fontSize:9,italic:true,color:P.muted,fontFace:"Calibri"});
+    });
+  });
+
+  // S9a: CAP MAP
+  { const s=pres.addSlide(); s.background={color:P.navy};
+    s.addShape(pres.ShapeType.rect,{x:0,y:0,w:.2,h:5.625,fill:{color:P.primary},line:{color:P.primary}});
+    hdr(s,"BUSINESS CAPABILITY MAP — AI OVERLAY","05a",true);
+    s.addText("6 L1 Domains  ●  AI use cases mapped to each sub-capability  ●  Details on next slide →",{x:.4,y:.82,w:9.2,h:.24,fontSize:10,italic:true,color:P.muted,fontFace:"Calibri"});
+    sl.capmap.forEach((d,i)=>{
+      const col=i%3,row=Math.floor(i/3),x=.35+col*3.15,y=1.12+row*2.1,c=rc(d.color);
+      s.addShape(pres.ShapeType.rect,{x,y,w:3,h:1.85,fill:{color:P.navyLight},line:{color:c},shadow:sh()});
+      s.addShape(pres.ShapeType.rect,{x,y,w:3,h:.52,fill:{color:c},line:{color:c}});
+      s.addText(d.icon,  {x,y:y+.05,w:.5,h:.42,fontSize:18,align:"center"});
+      s.addText(d.domain,{x:x+.5,y:y+.04,w:2.4,h:.44,fontSize:11,bold:true,color:P.white,fontFace:"Calibri",valign:"middle"});
+      d.subs.forEach((sub,j)=>{
+        const sx=x+.1,sy=y+.6+j*.3;
+        s.addShape(pres.ShapeType.rect,{x:sx,y:sy,w:2.8,h:.26,fill:{color:P.navyMid},line:{color:c,transparency:60}});
+        s.addShape(pres.ShapeType.rect,{x:sx,y:sy,w:.06,h:.26,fill:{color:c},line:{color:c}});
+        s.addText(sub,{x:sx+.1,y:sy+.02,w:2.6,h:.22,fontSize:9,color:P.lightGray,fontFace:"Calibri",valign:"middle"});
+      });
+    });
+  }
+
+  // S9b: CAP DETAIL
+  { const s=pres.addSlide(); s.background={color:P.offWhite}; hdr(s,"AI USE CASES BY CAPABILITY — DETAILED MAPPING","05b",false);
+    s.addText("Each sub-capability lists the specific AI / Agentic use cases that unlock value",{x:.3,y:.82,w:9.4,h:.22,fontSize:10,italic:true,color:P.muted,fontFace:"Calibri"});
+    let cx=.28; const cw=1.57;
+    sl.capdetail.forEach(cd=>{
+      const c=rc(cd.color);
+      s.addShape(pres.ShapeType.rect,{x:cx,y:1.08,w:cw,h:.42,fill:{color:c},line:{color:c}});
+      s.addText(cd.domain,{x:cx,y:1.09,w:cw,h:.40,fontSize:8.5,bold:true,color:P.white,fontFace:"Calibri",align:"center",valign:"middle"});
+      cd.subs.forEach((sub,si)=>{
+        const sy=1.56+si*1;
+        s.addShape(pres.ShapeType.rect,{x:cx,y:sy,w:cw,h:.28,fill:{color:P.navyMid},line:{color:c,transparency:45}});
+        s.addText(sub.cap,{x:cx+.04,y:sy+.02,w:cw-.06,h:.24,fontSize:8,bold:true,color:c,fontFace:"Calibri",valign:"middle"});
+        sub.uses.forEach((uc,ui)=>{
+          const uy=sy+.3+ui*.3;
+          s.addShape(pres.ShapeType.rect,{x:cx+.04,y:uy,w:cw-.08,h:.26,fill:{color:P.white},line:{color:P.lightGray}});
+          s.addShape(pres.ShapeType.rect,{x:cx+.04,y:uy,w:.06,h:.26,fill:{color:c,transparency:30},line:{color:c,transparency:30}});
+          s.addText(uc,{x:cx+.14,y:uy+.02,w:cw-.22,h:.22,fontSize:8,color:P.textDark,fontFace:"Calibri",valign:"middle"});
+        });
+      });
+      cx+=cw+.06;
+    });
+  }
+
+  // S10: MAPPING TABLE
+  { const s=pres.addSlide(); s.background={color:P.offWhite}; hdr(s,"AI USE CASE → CAPABILITY MAPPING","05c",false);
+    const hs=["AI / Agentic Use Case","Capability Domain","Sub-Capability","Value Unlocked","Impact"];
+    const cw=[2.95,1.72,1.85,1.55,1.55],cx=[.28];
+    cw.forEach((w,i)=>cx.push(cx[i]+w+.02));
+    hs.forEach((h,i)=>{
+      s.addShape(pres.ShapeType.rect,{x:cx[i],y:.86,w:cw[i],h:.36,fill:{color:P.navy},line:{color:P.navy}});
+      s.addText(h,{x:cx[i]+.06,y:.87,w:cw[i]-.1,h:.32,fontSize:9,bold:true,color:P.primary,fontFace:"Calibri",valign:"middle"});
+    });
+    sl.mapping.forEach((row,ri)=>{
+      const y=1.26+ri*.36,bg=ri%2===0?P.white:"EDF2F7",ic=rc(row.iColor);
+      [row.uc,row.dom,row.cap,row.val,row.impact].forEach((cell,ci)=>{
+        s.addShape(pres.ShapeType.rect,{x:cx[ci],y,w:cw[ci],h:.34,fill:{color:bg},line:{color:P.lightGray}});
+        if(ci===4){
+          s.addShape(pres.ShapeType.ellipse,{x:cx[ci]+.1,y:y+.08,w:.18,h:.18,fill:{color:ic},line:{color:ic}});
+          s.addText(cell,{x:cx[ci]+.32,y:y+.06,w:cw[ci]-.38,h:.24,fontSize:9,bold:true,color:ic,fontFace:"Calibri",valign:"middle"});
+        } else {
+          s.addText(cell,{x:cx[ci]+.06,y:y+.06,w:cw[ci]-.1,h:.24,fontSize:9,color:P.textDark,fontFace:"Calibri",valign:"middle"});
+        }
+      });
+    });
+  }
+
+  // S11: EXAMPLES
+  { const s=pres.addSlide(); s.background={color:P.offWhite}; hdr(s,"INDUSTRY EXAMPLES","06",false);
+    sl.examples.forEach((ex,i)=>{
+      const col=i%2,row=Math.floor(i/2),x=col===0?.28:5.15,y=.9+row*1.6;
+      s.addShape(pres.ShapeType.rect,{x,y,w:4.65,h:1.45,fill:{color:P.white},line:{color:P.lightGray},shadow:sh()});
+      s.addShape(pres.ShapeType.rect,{x,y,w:1.35,h:1.45,fill:{color:ex.color},line:{color:ex.color}});
+      s.addText(ex.brand,  {x,y:y+.42,w:1.35,h:.55,fontSize:9,bold:true,color:P.white,fontFace:"Calibri",align:"center"});
+      s.addShape(pres.ShapeType.rect,{x:x+1.45,y:y+.08,w:2.9,h:.24,fill:{color:ex.color,transparency:88},line:{color:ex.color,transparency:50}});
+      s.addText(ex.area,   {x:x+1.45,y:y+.08,w:2.9,h:.24,fontSize:9,bold:true,color:P.textDark,fontFace:"Calibri",align:"center",valign:"middle"});
+      s.addText(ex.usecase,{x:x+1.45,y:y+.36,w:3.08,h:.62,fontSize:9,color:P.textDark,fontFace:"Calibri"});
+      s.addShape(pres.ShapeType.rect,{x:x+1.45,y:y+1.06,w:3.08,h:.3,fill:{color:P.primary,transparency:84},line:{color:P.primary,transparency:55}});
+      s.addText("↗ "+ex.result,{x:x+1.55,y:y+1.09,w:2.9,h:.24,fontSize:9,bold:true,color:P.textDark,fontFace:"Calibri"});
+    });
+  }
+
+  // S12: ROADMAP
+  { const s=pres.addSlide(); s.background={color:P.navy};
+    s.addShape(pres.ShapeType.rect,{x:0,y:0,w:.2,h:5.625,fill:{color:P.primary},line:{color:P.primary}});
+    hdr(s,"RECOMMENDED NEXT STEPS",null,true);
+    s.addShape(pres.ShapeType.line,{x:1.75,y:1.55,w:6.5,h:0,line:{color:P.primary,transparency:50,width:2}});
+    sl.roadmap.phases.forEach((ph,i)=>{
+      const cx=1.75+i*3.25,c=rc(ph.color);
+      s.addShape(pres.ShapeType.ellipse,{x:cx-.3,y:1.25,w:.6,h:.6,fill:{color:c},line:{color:c}});
+      s.addText(String(i+1),{x:cx-.3,y:1.25,w:.6,h:.6,fontSize:14,bold:true,color:P.white,fontFace:"Calibri",align:"center",valign:"middle"});
+      s.addText(ph.phase,      {x:cx-1.35,y:.88,w:2.7,h:.3,fontSize:11,bold:true,color:c,fontFace:"Calibri",align:"center"});
+      s.addText(ph.label+" | "+ph.period,{x:cx-1.35,y:1.96,w:2.7,h:.26,fontSize:10,italic:true,color:P.lightGray,fontFace:"Calibri",align:"center"});
+      s.addShape(pres.ShapeType.rect,{x:cx-1.35,y:2.28,w:2.7,h:3,fill:{color:P.navyLight},line:{color:c,transparency:55}});
+      s.addShape(pres.ShapeType.rect,{x:cx-1.35,y:2.28,w:2.7,h:.06,fill:{color:c},line:{color:c}});
+      ph.items.forEach((item,j)=>{
+        const iy=2.42+j*.68;
+        s.addShape(pres.ShapeType.ellipse,{x:cx-1.24,y:iy+.18,w:.2,h:.2,fill:{color:c},line:{color:c}});
+        s.addText(item,{x:cx-.98,y:iy+.08,w:2.18,h:.52,fontSize:9.5,color:P.lightGray,fontFace:"Calibri"});
+      });
+    });
+    s.addShape(pres.ShapeType.rect,{x:0,y:5.13,w:10,h:.495,fill:{color:P.primary},line:{color:P.primary}});
+    s.addText(sl.roadmap.closingMessage,{x:.4,y:5.2,w:9.2,h:.36,fontSize:11,bold:true,color:P.navy,fontFace:"Calibri",align:"center"});
+  }
+
+  await pres.writeFile({ fileName: `${data.industry.replace(/\s+/g,"_")}_AI_Deck.pptx` });
+  onLog("✓ PPTX file downloaded to your Downloads folder!", "success");
+}
+
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
+const INDUSTRIES = ["Healthcare & Life Sciences","Financial Services & Banking","Manufacturing & Industry 4.0","Hospitality & Travel","Education & EdTech","Logistics & Supply Chain","Media & Entertainment","Telecommunications","Energy & Utilities","Real Estate & PropTech","Automotive","Consumer Goods & FMCG","Retail"];
+const AUDIENCES  = ["C-Suite / Board Level","Senior Management","Technology & IT Leaders","Operations Teams","Investors / PE"];
+
+// ─── APP ─────────────────────────────────────────────────────────────────────
+function App() {
+  const [apiKey,    setApiKey]    = useState(() => localStorage.getItem("anthropic_key") || "");
+  const [showModal, setShowModal] = useState(() => !localStorage.getItem("anthropic_key"));
+  const [keyInput,  setKeyInput]  = useState("");
+
+  const [industry,   setIndustry]   = useState("Healthcare & Life Sciences");
+  const [customInd,  setCustomInd]  = useState("");
+  const [audience,   setAudience]   = useState("Senior Management");
+  const [focusAreas, setFocusAreas] = useState("");
+  const [extraInst,  setExtraInst]  = useState("");
+  const [phase,      setPhase]      = useState("idle");
+  const [log,        setLog]        = useState([]);
+  const [deckData,   setDeckData]   = useState(null);
+  const [errMsg,     setErrMsg]     = useState("");
+  const logRef = useRef(null);
+
+  const addLog = useCallback((msg, type="info") => {
+    setLog(prev => [...prev, { msg, type, ts: Date.now() }]);
+    setTimeout(() => { if(logRef.current) logRef.current.scrollTop = 99999; }, 50);
+  }, []);
+
+  const saveKey = () => {
+    const k = keyInput.trim();
+    if (!k.startsWith("sk-")) return alert("Key must start with sk-");
+    localStorage.setItem("anthropic_key", k);
+    setApiKey(k);
+    setShowModal(false);
+  };
+
+  const finalInd = customInd.trim() || industry;
+
+  const runAgent = async () => {
+    if (!apiKey) { setShowModal(true); return; }
+    setPhase("researching"); setLog([]); setErrMsg(""); setDeckData(null);
+    try {
+      addLog(`Starting research: ${finalInd}`, "info");
+      addLog("Calling Claude API to generate slide content...", "info");
+
+      const userPrompt = `Generate a complete deck JSON for:\n\nIndustry: ${finalInd}\nTarget Audience: ${audience}\n${focusAreas?`Focus Areas: ${focusAreas}\n`:""}${extraInst?`Additional Instructions: ${extraInst}\n`:""}\nMake all content deeply specific to ${finalInd}. Use real companies, real data, and industry-accurate capability terminology.`;
+
+      const resp = await fetch("/.netlify/functions/claude", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiKey,
+          body: { model:"claude-sonnet-4-20250514", max_tokens:8000, system:MASTER_SYSTEM_PROMPT, messages:[{role:"user",content:userPrompt}] }
+        })
+      });
+
+      if (!resp.ok) {
+        const e = await resp.json();
+        throw new Error(e.error?.message || `API error ${resp.status}`);
+      }
+
+      const raw  = await resp.json();
+      const text = raw.content.map(b=>b.text||"").join("");
+      addLog("Research complete — parsing slide data...", "success");
+
+      let parsed;
+      try { parsed = JSON.parse(text.replace(/```json|```/g,"").trim()); }
+      catch(e) { throw new Error("JSON parse failed. Try again — Claude occasionally adds extra text.\n\n"+e.message); }
+
+      setDeckData(parsed);
+      addLog(`✓ ${Object.keys(parsed.slides).length} slide sections ready`, "success");
+      setPhase("building");
+
+      await renderDeck(parsed, addLog);
+      setPhase("done");
+
+    } catch(err) {
+      setErrMsg(err.message);
+      addLog("✗ "+err.message, "error");
+      setPhase("error");
+    }
+  };
+
+  const PC = { idle:"#00C4B4", researching:"#F5A623", building:"#7B4FBE", done:"#27AE60", error:"#E8473F" };
+  const PL = { idle:"READY", researching:"RESEARCHING...", building:"BUILDING PPTX...", done:"DONE ✓", error:"ERROR" };
+
+  const inp  = { width:"100%",padding:"8px 10px",background:"#0A1628",border:"1px solid #1E3A5F",borderRadius:"4px",color:"#F0F4F8",fontSize:"12px",outline:"none",boxSizing:"border-box" };
+  const sel  = { ...inp, cursor:"pointer", appearance:"none" };
+  const lblS = { fontSize:"10px",fontWeight:700,color:"#94A3B8",letterSpacing:"2px",marginBottom:"7px",display:"block" };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",height:"100vh",background:"#0A1628",color:"#F0F4F8"}}>
+
+      {/* API KEY MODAL */}
+      {showModal && (
+        <div className="modal-overlay">
+          <div className="modal-box">
+            <div style={{fontSize:"20px",fontWeight:800,color:"#00C4B4",letterSpacing:"2px",marginBottom:"6px"}}>API KEY REQUIRED</div>
+            <p style={{fontSize:"12px",color:"#94A3B8",marginBottom:"20px",lineHeight:1.7}}>
+              This tool calls the Anthropic Claude API directly from your browser.<br/>
+              Your key is stored only in your browser's localStorage — never sent anywhere else.<br/>
+              Get your key at <a href="https://console.anthropic.com" target="_blank" style={{color:"#00C4B4"}}>console.anthropic.com</a>
+            </p>
+            <input
+              placeholder="sk-ant-api03-..."
+              value={keyInput}
+              onChange={e=>setKeyInput(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&saveKey()}
+              style={{...inp, marginBottom:"12px", fontSize:"13px"}}
+            />
+            <div style={{display:"flex",gap:"10px"}}>
+              <button onClick={saveKey} className="btn-primary" style={{flex:1}}>SAVE & CONTINUE</button>
+              {apiKey && <button onClick={()=>setShowModal(false)} style={{padding:"10px 18px",background:"transparent",border:"1px solid #1E3A5F",borderRadius:"6px",color:"#94A3B8",cursor:"pointer",fontSize:"12px"}}>Cancel</button>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* HEADER */}
+      <div style={{background:"#0F2044",borderBottom:"3px solid #00C4B4",padding:"16px 28px",display:"flex",alignItems:"center",gap:"14px",flexShrink:0}}>
+        <div style={{width:"6px",height:"40px",background:"#00C4B4",borderRadius:"2px"}}/>
+        <div>
+          <div style={{fontSize:"20px",fontWeight:800,color:"#00C4B4",letterSpacing:"3px"}}>AI DECK GENERATOR</div>
+          <div style={{fontSize:"11px",color:"#94A3B8",marginTop:"2px"}}>Research → Analyse → Build → Download  ·  13-slide PPTX for any industry</div>
+        </div>
+        <div style={{marginLeft:"auto",display:"flex",gap:"10px",alignItems:"center"}}>
+          <button onClick={()=>{setKeyInput(apiKey);setShowModal(true);}} style={{padding:"6px 14px",background:"transparent",border:"1px solid #1E3A5F",borderRadius:"20px",color:"#94A3B8",cursor:"pointer",fontSize:"11px"}}>
+            🔑 {apiKey?"Change API Key":"Set API Key"}
+          </button>
+          <div style={{display:"flex",alignItems:"center",gap:"8px",background:"#162955",borderRadius:"20px",padding:"6px 14px",border:`1px solid ${PC[phase]}`}}>
+            <div style={{width:"8px",height:"8px",borderRadius:"50%",background:PC[phase],boxShadow:`0 0 6px ${PC[phase]}`}}/>
+            <span style={{fontSize:"11px",fontWeight:700,color:PC[phase],letterSpacing:"1px"}}>{PL[phase]}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* BODY */}
+      <div style={{display:"grid",gridTemplateColumns:"320px 1fr",flex:1,overflow:"hidden"}}>
+
+        {/* LEFT PANEL */}
+        <div style={{background:"#162955",borderRight:"1px solid #1E3A5F",padding:"20px 18px",overflowY:"auto",display:"flex",flexDirection:"column",gap:"16px"}}>
+
+          <div>
+            <span style={lblS}>🏭  INDUSTRY</span>
+            <select value={industry} onChange={e=>{setIndustry(e.target.value);setCustomInd("");}} style={sel}>
+              {INDUSTRIES.map(i=><option key={i}>{i}</option>)}
+            </select>
+            <input placeholder="Or type a custom industry..." value={customInd} onChange={e=>setCustomInd(e.target.value)} style={{...inp,marginTop:"6px"}}/>
+          </div>
+
+          <div>
+            <span style={lblS}>👥  AUDIENCE</span>
+            <div style={{display:"flex",flexWrap:"wrap",gap:"5px"}}>
+              {AUDIENCES.map(a=>(
+                <button key={a} onClick={()=>setAudience(a)} style={{
+                  padding:"4px 10px",borderRadius:"4px",fontSize:"10px",cursor:"pointer",border:`1px solid ${audience===a?"#00C4B4":"#1E3A5F"}`,
+                  background:audience===a?"#00C4B4":"#0F2044",color:audience===a?"#0A1628":"#94A3B8",fontWeight:audience===a?700:400,transition:"all .15s"
+                }}>{a}</button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <span style={lblS}>🎯  FOCUS AREAS (optional)</span>
+            <input placeholder="e.g. Acute Care, Private Banking, EV Manufacturing..." value={focusAreas} onChange={e=>setFocusAreas(e.target.value)} style={inp}/>
+          </div>
+
+          <div>
+            <span style={lblS}>📝  EXTRA INSTRUCTIONS (optional)</span>
+            <textarea placeholder="e.g. Include ESG angle, focus on GenAI, add regulatory context..." value={extraInst} onChange={e=>setExtraInst(e.target.value)} rows={3} style={{...inp,resize:"vertical"}}/>
+          </div>
+
+          <div style={{background:"#0A1628",borderRadius:"6px",padding:"12px",fontSize:"10px",color:"#94A3B8",lineHeight:1.8}}>
+            <div style={{color:"#00C4B4",fontWeight:700,fontSize:"10px",letterSpacing:"1px",marginBottom:"5px"}}>OUTPUT: 13 SLIDES</div>
+            {["01  Industry Landscape + Growth Chart","02  6 Trends with Heat Bars","03  5 Imperatives + Urgency Bars","04a–c  12 AI Use Cases (3 stages)","05a  Capability Map (6 L1 domains)","05b  AI Use Cases per Sub-Capability","05c  Use Case → Capability Table","06  6 Branded Industry Examples","07  3-Phase Roadmap Timeline"].map(l=><div key={l}>{l}</div>)}
+          </div>
+
+          <button className="btn-primary" onClick={runAgent} disabled={phase==="researching"||phase==="building"}>
+            {phase==="researching"?"⟳  RESEARCHING...":phase==="building"?"⟳  BUILDING PPTX...":phase==="done"?"↓  GENERATE ANOTHER":"▶  GENERATE DECK"}
+          </button>
+        </div>
+
+        {/* RIGHT PANEL */}
+        <div style={{padding:"20px 24px",overflowY:"auto",display:"flex",flexDirection:"column",gap:"14px"}}>
+
+          {/* Log */}
+          <div style={{background:"#0A1628",borderRadius:"6px",border:"1px solid #1E3A5F"}}>
+            <div style={{padding:"8px 14px",borderBottom:"1px solid #1E3A5F",fontSize:"10px",fontWeight:700,color:"#4A5568",letterSpacing:"2px"}}>AGENT LOG</div>
+            <div ref={logRef} style={{padding:"12px 14px",fontFamily:"'Courier New',monospace",fontSize:"11px",height:"155px",overflowY:"auto"}}>
+              {log.length===0 && <span style={{color:"#4A5568"}}>Click ▶ GENERATE DECK to begin...</span>}
+              {log.map((l,i)=>(
+                <div key={i} style={{marginBottom:"3px",color:l.type==="error"?"#E8473F":l.type==="success"?"#27AE60":"#94A3B8"}}>
+                  <span style={{color:"#4A5568"}}>[{new Date(l.ts).toLocaleTimeString()}] </span>{l.msg}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {errMsg && (
+            <div style={{background:"#2D0A0A",border:"1px solid #E8473F",borderRadius:"6px",padding:"12px",fontSize:"11px",color:"#F87171",fontFamily:"monospace",whiteSpace:"pre-wrap",maxHeight:"150px",overflowY:"auto"}}>
+              {errMsg}
+            </div>
+          )}
+
+          {phase==="done" && (
+            <div style={{background:"#0A2D1A",border:"1px solid #27AE60",borderRadius:"6px",padding:"14px 18px",display:"flex",alignItems:"center",gap:"12px"}}>
+              <span style={{fontSize:"24px"}}>✅</span>
+              <div>
+                <div style={{color:"#27AE60",fontWeight:700,fontSize:"13px"}}>Deck downloaded successfully!</div>
+                <div style={{color:"#94A3B8",fontSize:"11px",marginTop:"3px"}}>
+                  Check your Downloads folder for <strong style={{color:"#F0F4F8"}}>{finalInd.replace(/\s+/g,"_")}_AI_Deck.pptx</strong>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {deckData && (
+            <div style={{background:"#0F2044",borderRadius:"6px",border:"1px solid #1E3A5F",padding:"18px"}}>
+              <div style={{color:"#00C4B4",fontWeight:700,fontSize:"11px",letterSpacing:"2px",marginBottom:"12px"}}>
+                CONTENT PREVIEW — {deckData.industry.toUpperCase()}
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:"8px",marginBottom:"10px"}}>
+                {deckData.slides.title?.stats?.map((st,i)=>(
+                  <div key={i} style={{background:"#162955",borderRadius:"6px",padding:"10px",textAlign:"center",border:"1px solid #1E3A5F"}}>
+                    <div style={{fontSize:"18px",fontWeight:800,color:"#00C4B4"}}>{st.value}</div>
+                    <div style={{fontSize:"9px",color:"#94A3B8",marginTop:"3px"}}>{st.label}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px",marginBottom:"8px"}}>
+                <div style={{background:"#162955",borderRadius:"6px",padding:"10px"}}>
+                  <div style={{color:"#F5A623",fontWeight:700,fontSize:"10px",marginBottom:"5px",letterSpacing:"1px"}}>TOP TRENDS</div>
+                  {deckData.slides.trends?.slice(0,4).map((t,i)=><div key={i} style={{color:"#CBD5E1",fontSize:"10px",marginBottom:"3px"}}>• {t.title}</div>)}
+                </div>
+                <div style={{background:"#162955",borderRadius:"6px",padding:"10px"}}>
+                  <div style={{color:"#7B4FBE",fontWeight:700,fontSize:"10px",marginBottom:"5px",letterSpacing:"1px"}}>IMPERATIVES</div>
+                  {deckData.slides.imperatives?.slice(0,4).map((t,i)=><div key={i} style={{color:"#CBD5E1",fontSize:"10px",marginBottom:"3px"}}>• {t.imp}</div>)}
+                </div>
+              </div>
+              <div style={{background:"#162955",borderRadius:"6px",padding:"10px"}}>
+                <div style={{color:"#27AE60",fontWeight:700,fontSize:"10px",marginBottom:"6px",letterSpacing:"1px"}}>CAPABILITY DOMAINS</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:"5px"}}>
+                  {deckData.slides.capmap?.map((d,i)=>(
+                    <span key={i} style={{background:"#0A1628",border:"1px solid #1E3A5F",borderRadius:"4px",padding:"3px 9px",fontSize:"9px",color:"#94A3B8"}}>{d.domain}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {phase==="idle" && !deckData && (
+            <div style={{background:"#0F2044",borderRadius:"6px",border:"1px solid #1E3A5F",padding:"22px"}}>
+              <div style={{color:"#00C4B4",fontWeight:700,fontSize:"13px",letterSpacing:"2px",marginBottom:"14px"}}>HOW TO USE</div>
+              <div style={{display:"grid",gridTemplateColumns:"30px 1fr",gap:"10px 8px",alignItems:"start",fontSize:"12px",color:"#94A3B8",lineHeight:1.7}}>
+                {[
+                  ["①","Set your Anthropic API key (click 🔑 above). Stored only in your browser."],
+                  ["②","Select an industry from the dropdown — or type any custom industry."],
+                  ["③","Choose your audience to calibrate the depth and tone."],
+                  ["④","Optionally add focus areas or custom instructions."],
+                  ["⑤","Click ▶ GENERATE DECK — Claude researches and builds all 13 slides."],
+                  ["⑥","The PPTX downloads automatically to your Downloads folder."],
+                ].map(([n,t])=>[
+                  <span key={n} style={{color:"#00C4B4",fontWeight:800,textAlign:"center"}}>{n}</span>,
+                  <span key={n+"t"}>{t}</span>
+                ])}
+              </div>
+              <div style={{marginTop:"16px",padding:"12px",background:"#0A1628",borderRadius:"6px",fontSize:"11px",color:"#94A3B8",lineHeight:1.6}}>
+                💡 <strong style={{color:"#F0F4F8"}}>API cost:</strong> Each deck generation uses ~4,000–6,000 output tokens (Claude Sonnet). Approx <strong style={{color:"#00C4B4"}}>$0.06–$0.09 per deck</strong> at standard Anthropic pricing.
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>

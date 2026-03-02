@@ -405,31 +405,90 @@ function App() {
     setPhase("researching"); setLog([]); setErrMsg(""); setDeckData(null);
     try {
       addLog(`Starting research: ${finalInd}`, "info");
-      addLog("Calling Claude API to generate slide content...", "info");
 
-      const userPrompt = `Generate a complete deck JSON for:\n\nIndustry: ${finalInd}\nTarget Audience: ${audience}\n${focusAreas?`Focus Areas: ${focusAreas}\n`:""}${extraInst?`Additional Instructions: ${extraInst}\n`:""}\nMake all content deeply specific to ${finalInd}. Use real companies, real data, and industry-accurate capability terminology.`;
+      const callClaude = async (prompt, maxTokens=4000) => {
+        const r = await fetch("/.netlify/functions/claude", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            apiKey,
+            body: { model:"claude-haiku-4-5-20251001", max_tokens:maxTokens, messages:[{role:"user",content:prompt}] }
+          })
+        });
+        if (!r.ok) { const e = await r.json(); throw new Error(e.error?.message || `API error ${r.status}`); }
+        const d = await r.json();
+        return d.content.map(b=>b.text||"").join("");
+      };
 
-      const resp = await fetch("/.netlify/functions/claude", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          apiKey,
-          body: { model:"claude-sonnet-4-20250514", max_tokens:8000, system:MASTER_SYSTEM_PROMPT, messages:[{role:"user",content:userPrompt}] }
-        })
-      });
+      // ── CALL 1: Industry context + first half of slides ──
+      addLog("Step 1/2 — Researching industry landscape, trends & use cases...", "info");
+      const prompt1 = `You are an expert industry analyst. Generate PART 1 of a deck JSON for:
+Industry: ${finalInd}
+Audience: ${audience}
+${focusAreas?`Focus: ${focusAreas}`:""}
+${extraInst?`Notes: ${extraInst}`:""}
 
-      if (!resp.ok) {
-        const e = await resp.json();
-        throw new Error(e.error?.message || `API error ${resp.status}`);
-      }
+Return ONLY raw JSON (no markdown) with exactly this structure:
+{
+  "industry": string,
+  "subtitle": string,
+  "audience": string,
+  "palette": { "primary": hex6, "accent": hex6, "highlight": hex6 },
+  "slides": {
+    "title": { "heading": string, "subheading": string, "tagline": string, "stats": [{"value":string,"label":string,"color":"primary|accent|highlight"},{"value":string,"label":string,"color":"primary|accent|highlight"},{"value":string,"label":string,"color":"primary|accent|highlight"}] },
+    "landscape": { "marketSize": string, "marketLabel": string, "growthBars": [{"label":string,"value":string,"pct":number},{"label":string,"value":string,"pct":number},{"label":string,"value":string,"pct":number},{"label":string,"value":string,"pct":number}], "forces": [{"icon":string,"label":string,"desc":string,"color":"primary|accent|highlight|green|coral"},{"icon":string,"label":string,"desc":string,"color":"primary|accent|highlight|green|coral"},{"icon":string,"label":string,"desc":string,"color":"primary|accent|highlight|green|coral"},{"icon":string,"label":string,"desc":string,"color":"primary|accent|highlight|green|coral"},{"icon":string,"label":string,"desc":string,"color":"primary|accent|highlight|green|coral"}] },
+    "trends": [{"num":string,"title":string,"heat":number,"color":"primary|accent|highlight|purple|coral|green|orange","icon":string,"desc":string},{"num":string,"title":string,"heat":number,"color":"primary|accent|highlight|purple|coral|green|orange","icon":string,"desc":string},{"num":string,"title":string,"heat":number,"color":"primary|accent|highlight|purple|coral|green|orange","icon":string,"desc":string},{"num":string,"title":string,"heat":number,"color":"primary|accent|highlight|purple|coral|green|orange","icon":string,"desc":string},{"num":string,"title":string,"heat":number,"color":"primary|accent|highlight|purple|coral|green|orange","icon":string,"desc":string},{"num":string,"title":string,"heat":number,"color":"primary|accent|highlight|purple|coral|green|orange","icon":string,"desc":string}],
+    "imperatives": [{"n":string,"icon":string,"imp":string,"urgency":number,"color":"primary|accent|highlight|purple|coral|green","detail":string},{"n":string,"icon":string,"imp":string,"urgency":number,"color":"primary|accent|highlight|purple|coral|green","detail":string},{"n":string,"icon":string,"imp":string,"urgency":number,"color":"primary|accent|highlight|purple|coral|green","detail":string},{"n":string,"icon":string,"imp":string,"urgency":number,"color":"primary|accent|highlight|purple|coral|green","detail":string},{"n":string,"icon":string,"imp":string,"urgency":number,"color":"primary|accent|highlight|purple|coral|green","detail":string}],
+    "usecases_cx":  [{"title":string,"agent":boolean,"value":string,"valueColor":"green|primary|accent|highlight|purple|coral","desc":string,"example":string},{"title":string,"agent":boolean,"value":string,"valueColor":"green|primary|accent|highlight|purple|coral","desc":string,"example":string},{"title":string,"agent":boolean,"value":string,"valueColor":"green|primary|accent|highlight|purple|coral","desc":string,"example":string},{"title":string,"agent":boolean,"value":string,"valueColor":"green|primary|accent|highlight|purple|coral","desc":string,"example":string}],
+    "usecases_sc":  [{"title":string,"agent":boolean,"value":string,"valueColor":"green|primary|accent|highlight|purple|coral","desc":string,"example":string},{"title":string,"agent":boolean,"value":string,"valueColor":"green|primary|accent|highlight|purple|coral","desc":string,"example":string},{"title":string,"agent":boolean,"value":string,"valueColor":"green|primary|accent|highlight|purple|coral","desc":string,"example":string},{"title":string,"agent":boolean,"value":string,"valueColor":"green|primary|accent|highlight|purple|coral","desc":string,"example":string}],
+    "usecases_ops": [{"title":string,"agent":boolean,"value":string,"valueColor":"green|primary|accent|highlight|purple|coral","desc":string,"example":string},{"title":string,"agent":boolean,"value":string,"valueColor":"green|primary|accent|highlight|purple|coral","desc":string,"example":string},{"title":string,"agent":boolean,"value":string,"valueColor":"green|primary|accent|highlight|purple|coral","desc":string,"example":string},{"title":string,"agent":boolean,"value":string,"valueColor":"green|primary|accent|highlight|purple|coral","desc":string,"example":string}]
+  }
+}
+All content must be specific to ${finalInd}. hex = 6 chars no #. Return ONLY raw JSON.`;
 
-      const raw  = await resp.json();
-      const text = raw.content.map(b=>b.text||"").join("");
-      addLog("Research complete — parsing slide data...", "success");
+      const text1 = await callClaude(prompt1, 4000);
+      addLog("Step 1/2 complete ✓", "success");
 
-      let parsed;
-      try { parsed = JSON.parse(text.replace(/```json|```/g,"").trim()); }
-      catch(e) { throw new Error("JSON parse failed. Try again — Claude occasionally adds extra text.\n\n"+e.message); }
+      // ── CALL 2: Capability map, examples, roadmap ──
+      addLog("Step 2/2 — Building capability map, examples & roadmap...", "info");
+      const prompt2 = `You are an expert industry analyst. Generate PART 2 of a deck JSON for:
+Industry: ${finalInd}
+Audience: ${audience}
+
+Return ONLY raw JSON (no markdown) with exactly this structure:
+{
+  "capmap": [{"domain":string,"color":"primary|accent|highlight|purple|coral|green","icon":string,"subs":[string,string,string,string]},{"domain":string,"color":"primary|accent|highlight|purple|coral|green","icon":string,"subs":[string,string,string,string]},{"domain":string,"color":"primary|accent|highlight|purple|coral|green","icon":string,"subs":[string,string,string,string]},{"domain":string,"color":"primary|accent|highlight|purple|coral|green","icon":string,"subs":[string,string,string,string]},{"domain":string,"color":"primary|accent|highlight|purple|coral|green","icon":string,"subs":[string,string,string,string]},{"domain":"PLANNING","color":"primary","icon":"📋","subs":[string,string,string,string]}],
+  "capdetail": [{"domain":string,"color":"primary|accent|highlight|purple|coral|green","subs":[{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]}]},{"domain":string,"color":"primary|accent|highlight|purple|coral|green","subs":[{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]}]},{"domain":string,"color":"primary|accent|highlight|purple|coral|green","subs":[{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]}]},{"domain":string,"color":"primary|accent|highlight|purple|coral|green","subs":[{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]}]},{"domain":string,"color":"primary|accent|highlight|purple|coral|green","subs":[{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]}]},{"domain":"PLANNING","color":"primary","subs":[{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]},{"cap":string,"uses":[string,string]}]}],
+  "mapping": [{"uc":string,"dom":string,"cap":string,"val":string,"impact":"HIGH|MED|LOW","iColor":"green|accent|highlight"},{"uc":string,"dom":string,"cap":string,"val":string,"impact":"HIGH|MED|LOW","iColor":"green|accent|highlight"},{"uc":string,"dom":string,"cap":string,"val":string,"impact":"HIGH|MED|LOW","iColor":"green|accent|highlight"},{"uc":string,"dom":string,"cap":string,"val":string,"impact":"HIGH|MED|LOW","iColor":"green|accent|highlight"},{"uc":string,"dom":string,"cap":string,"val":string,"impact":"HIGH|MED|LOW","iColor":"green|accent|highlight"},{"uc":string,"dom":string,"cap":string,"val":string,"impact":"HIGH|MED|LOW","iColor":"green|accent|highlight"},{"uc":string,"dom":string,"cap":string,"val":string,"impact":"HIGH|MED|LOW","iColor":"green|accent|highlight"},{"uc":string,"dom":string,"cap":string,"val":string,"impact":"HIGH|MED|LOW","iColor":"green|accent|highlight"},{"uc":string,"dom":string,"cap":string,"val":string,"impact":"HIGH|MED|LOW","iColor":"green|accent|highlight"},{"uc":string,"dom":string,"cap":string,"val":string,"impact":"HIGH|MED|LOW","iColor":"green|accent|highlight"},{"uc":string,"dom":string,"cap":string,"val":string,"impact":"HIGH|MED|LOW","iColor":"green|accent|highlight"},{"uc":string,"dom":string,"cap":string,"val":string,"impact":"HIGH|MED|LOW","iColor":"green|accent|highlight"}],
+  "examples": [{"brand":string,"color":hex6,"area":string,"usecase":string,"result":string},{"brand":string,"color":hex6,"area":string,"usecase":string,"result":string},{"brand":string,"color":hex6,"area":string,"usecase":string,"result":string},{"brand":string,"color":hex6,"area":string,"usecase":string,"result":string},{"brand":string,"color":hex6,"area":string,"usecase":string,"result":string},{"brand":string,"color":hex6,"area":string,"usecase":string,"result":string}],
+  "roadmap": { "phases": [{"phase":string,"label":string,"period":string,"color":"primary|accent|purple","items":[string,string,string,string]},{"phase":string,"label":string,"period":string,"color":"primary|accent|purple","items":[string,string,string,string]},{"phase":string,"label":string,"period":string,"color":"primary|accent|purple","items":[string,string,string,string]}], "closingMessage": string }
+}
+All content specific to ${finalInd}. hex = 6 chars no #. Return ONLY raw JSON.`;
+
+      const text2 = await callClaude(prompt2, 4000);
+      addLog("Step 2/2 complete ✓", "success");
+
+      // ── MERGE both responses ──
+      let part1, part2;
+      try { part1 = JSON.parse(text1.replace(/```json|```/g,"").trim()); }
+      catch(e) { throw new Error("Part 1 JSON parse failed: "+e.message); }
+      try { part2 = JSON.parse(text2.replace(/```json|```/g,"").trim()); }
+      catch(e) { throw new Error("Part 2 JSON parse failed: "+e.message); }
+
+      let parsed = {
+        industry: part1.industry,
+        subtitle: part1.subtitle,
+        audience: part1.audience,
+        palette: part1.palette,
+        slides: {
+          ...part1.slides,
+          capmap:    part2.capmap,
+          capdetail: part2.capdetail,
+          mapping:   part2.mapping,
+          examples:  part2.examples,
+          roadmap:   part2.roadmap,
+        }
+      };
 
       setDeckData(parsed);
       addLog(`✓ ${Object.keys(parsed.slides).length} slide sections ready`, "success");

@@ -16,17 +16,22 @@ exports.handler = async (event) => {
 
   try {
     const { apiKey, body } = JSON.parse(event.body);
-
-    // Use env variable if set, otherwise use key passed from browser
     const key = process.env.ANTHROPIC_API_KEY || apiKey;
 
     if (!key || !key.startsWith("sk-")) {
       return {
         statusCode: 401,
         headers,
-        body: JSON.stringify({ error: { message: "Invalid or missing Anthropic API key. Please check your key." } }),
+        body: JSON.stringify({ error: { message: "Invalid or missing API key" } }),
       };
     }
+
+    // Use Haiku for speed - fits within Netlify free tier 26s timeout
+    const requestBody = {
+      ...body,
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 6000,
+    };
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -35,17 +40,21 @@ exports.handler = async (event) => {
         "x-api-key": key,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(requestBody),
     });
 
     const data = await response.json();
-    return { statusCode: response.status, headers, body: JSON.stringify(data) };
+    return {
+      statusCode: response.status,
+      headers,
+      body: JSON.stringify(data),
+    };
 
   } catch (err) {
     return {
       statusCode: 500,
       headers,
-      body: JSON.stringify({ error: { message: "Function error: " + err.message } }),
+      body: JSON.stringify({ error: { message: err.message } }),
     };
   }
 };
